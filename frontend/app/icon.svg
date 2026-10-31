@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Connect">
+  <rect width="32" height="32" rx="8" fill="#4f46e5" />
+  <path
+    d="M21.5 12.2a6.4 6.4 0 0 0-9.9-1.6l-1.8 1.8a6.4 6.4 0 0 0 0 9.1l.9.9m-1 1.4a6.4 6.4 0 0 0 9.9 1.6l1.8-1.8a6.4 6.4 0 0 0 0-9.1l-.9-.9"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="2.2"
+    stroke-linecap="round"
+  />
+</svg>

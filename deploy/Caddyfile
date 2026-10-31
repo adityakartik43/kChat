@@ -1,0 +1,95 @@
+# TLS terminator for the internal LAN.
+#
+# Why this exists: browsers only expose `navigator.mediaDevices` — the camera
+# and microphone APIs every call depends on — inside a *secure context*. Plain
+# `http://192.168.1.46:3000` is not secure, so audio and video calling is
+# impossible there no matter how the app is written. Serving the same build
+# over HTTPS fixes it.
+#
+# `tls internal` issues a certificate from a Caddy-managed CA that lives in
+# the mounted volume. Browsers do not trust that CA by default, so the first
+# visit shows a warning; see `deploy/README.md` for the one-time CA install
+# that removes it.
+#
+# Everything is served from ONE origin, which matters for two reasons:
+#   1. No cross-origin requests, so CORS does not apply and the API port
+#      (4000) never has to be reachable from a browser.
+#   2. An https:// page cannot make plain-http requests — a second origin on
+#      port 4000 would be blocked as mixed content anyway.
+{
+	# The admin API is left on Caddy's default `localhost:2019`, which inside a
+	# container is the *container's own* loopback. It is not published in
+	# docker-compose.yml and not on the container network, so it stays
+	# unreachable from the host and the LAN.
+	#
+	# It has to be enabled: `caddy reload` talks to it, and that is what lets
+	# `deploy/restart-proxy.sh --reload` apply a Caddyfile change without
+	# dropping live connections. With `admin off` the reload always failed and
+	# silently degraded to a full container restart.
+	#
+	# If you add `- "2019:2019"` to the compose ports, you have just exposed
+	# remote reconfiguration of this proxy to the network. Don't.
+
+	# Browsers must not put an IP literal in the TLS SNI extension (RFC 6066
+	# reserves it for hostnames), so a client visiting https://192.168.1.46
+	# arrives with NO server name at all. Without this, Caddy cannot pick a
+	# certificate for the connection and aborts the handshake with
+	# "tlsv1 alert internal error" (alert 80) — which looks like a broken proxy
+	# but is really a name-selection failure. Naming the address here makes it
+	# the fallback for connections that carry no SNI.
+	default_sni 192.168.1.46
+}
+
+# The certificate must name every address a user might type. The IP is the
+# only one that resolves on this network, because the machine's hostname
+# points at 127.0.1.1 in /etc/hosts and is therefore useless to anyone else.
+# If the DHCP lease changes, update SITE_ADDRESS and reload.
+https://192.168.1.46 {
+	tls internal
+
+	header {
+		# The app is only ever served to a browser on the same LAN, so
+		# everything the upstream sets is passed through unchanged.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+
+	# `handle_path` strips the /api prefix, which lands the request on the
+	# API's own routes (/auth/login, /conversations, /calls, ...). The API has
+	# no global prefix, so the strip is required rather than cosmetic.
+	handle_path /api/* {
+		reverse_proxy host.docker.internal:4000
+	}
+
+	# No prefix strip here: Socket.IO expects to be reached at /socket.io/ on
+	# the server that owns the upgrade.
+	handle /socket.io/* {
+		reverse_proxy host.docker.internal:4000
+	}
+
+	handle {
+		reverse_proxy host.docker.internal:3000 {
+			# Marks a request that has already come through the terminator, so
+			# the app can tell it apart from a browser that reached port 3000
+			# directly. Those must be served, not redirected — see the app's
+			# `proxy.ts`, which sends the direct ones to this HTTPS origin.
+			#
+			# The upstream hop is plain HTTP by necessity: TLS is already
+			# terminated here, and re-encrypting to the host would only add a
+			# second certificate to trust for no gain, since this hop never
+			# leaves the machine.
+			header_up X-Connect-Proxy 1
+		}
+	}
+}
+
+# Anything that arrives over plain HTTP is redirected rather than served, so a
+# user who forgets the scheme is not left on an origin where calling silently
+# fails. Chat still works either way, which is exactly why this is easy to miss.
+#
+# Published on 8080, not 80: this host already runs an unrelated Apache on 80.
+# Caddy is listening on 80 *inside* the container, so `docker-compose.yml` maps
+# host 8080 to it.
+http://192.168.1.46 {
+	redir https://{host}{uri} permanent
+}

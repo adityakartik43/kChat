@@ -1,0 +1,41 @@
+# TLS terminator only.
+#
+# The API and the web app run on the host (see backend/scripts/restart-api.sh
+# and restart-web.sh); this compose file just puts HTTPS in front of them. They
+# are reached over the Docker bridge, so no host port for 4000 or 3000 needs to
+# be published — which is deliberate: the browser only ever talks to 443.
+#
+# Start order:
+#   backend/scripts/restart-api.sh
+#   backend/scripts/restart-web.sh
+#   docker compose -f deploy/docker-compose.yml up -d
+
+services:
+  proxy:
+    image: caddy:2-alpine
+    container_name: connect-proxy
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      # Convenience redirect to HTTPS, on 8080 because this host already runs
+      # an unrelated Apache on port 80 that must not be disturbed.
+      - "8080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Holds the internal CA's private key and issued certificates. Deleting
+      # it invalidates the certificate every LAN browser has already accepted.
+      - caddy-data:/data
+      - caddy-config:/config
+    # The upstream services are on the host, so `host.docker.internal` rather
+    # than compose service names.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,309 @@
+// ============================================================
+// CONNECT — realtime chat application
+// Database schema (PostgreSQL / Supabase)
+// ============================================================
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+
+  // The chat app owns a dedicated Postgres schema so it can share a
+  // Supabase project with other apps without colliding in `public`.
+  schemas = ["chat"]
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+
+  @@schema("chat")
+}
+
+/// Lifecycle of a connection request between two users.
+enum ConnectionStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  BLOCKED
+
+  @@schema("chat")
+}
+
+enum ConversationType {
+  DIRECT
+  GROUP
+
+  @@schema("chat")
+}
+
+enum ParticipantRole {
+  OWNER
+  ADMIN
+  MEMBER
+
+  @@schema("chat")
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+
+  @@schema("chat")
+}
+
+/// Whether a call carried audio only, or audio and video.
+enum CallKind {
+  AUDIO
+  VIDEO
+
+  @@schema("chat")
+}
+
+/// How a call ended. ENDED_* are clean teardown by a participant;
+/// MISSED means the callee never answered before the timeout.
+enum CallStatus {
+  RINGING
+  ACCEPTED
+  ENDED_BY_CALLER
+  ENDED_BY_CALLEE
+  DECLINED
+  MISSED
+  FAILED
+
+  @@schema("chat")
+}
+
+// ============================================================
+// IDENTITY
+// ============================================================
+
+/// A registered account.
+/// `connectNumber` is the app-assigned private number that a user
+/// shares so other people can find and connect to them.
+model User {
+  id            String     @id @default(uuid()) @db.Uuid
+  email         String     @unique
+  passwordHash  String
+  name          String
+  avatarUrl     String?
+  /// 10 digit private number, stored undelimited (e.g. "4821993017").
+  connectNumber String     @unique
+  status        UserStatus @default(ACTIVE)
+
+  lastSeenAt  DateTime  @default(now())
+  lastLoginAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Auth
+  sessions AuthSession[]
+
+  // Connections
+  connectionsSent     Connection[] @relation("ConnectionRequester")
+  connectionsReceived Connection[] @relation("ConnectionAddressee")
+
+  // Chat
+  participants         ConversationParticipant[]
+  messages             Message[]
+  messageReads         MessageRead[]
+  createdConversations Conversation[]            @relation("ConversationCreator")
+  callsPlaced          Call[]                    @relation("CallCaller")
+  callsReceived        Call[]                    @relation("CallReceiver")
+
+  @@index([status])
+  @@index([connectNumber])
+  @@map("users")
+  @@schema("chat")
+}
+
+/// Server side refresh-token sessions. Only the hash is stored.
+model AuthSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  refreshTokenHash String    @unique
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  ipAddress        String?
+  userAgent        String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+  @@schema("chat")
+}
+
+// ============================================================
+// CONNECTIONS
+// ============================================================
+
+/// A directed connection request. Accepting it makes both users connected.
+/// The pair (requesterId, addresseeId) is unique.
+model Connection {
+  id          String           @id @default(uuid()) @db.Uuid
+  requesterId String           @db.Uuid
+  addresseeId String           @db.Uuid
+  status      ConnectionStatus @default(PENDING)
+  respondedAt DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  requester User @relation("ConnectionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee User @relation("ConnectionAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId, status])
+  @@index([requesterId, status])
+  @@map("connections")
+  @@schema("chat")
+}
+
+// ============================================================
+// CONVERSATIONS
+// ============================================================
+
+model Conversation {
+  id          String           @id @default(uuid()) @db.Uuid
+  type        ConversationType @default(DIRECT)
+  title       String?
+  avatarUrl   String?
+  createdById String?          @db.Uuid
+
+  /// Deterministic key for DIRECT conversations built from the two sorted
+  /// participant ids. Guarantees only one direct chat per pair of users.
+  /// NULL for GROUP conversations.
+  directKey String? @unique
+
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy    User?                     @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  participants ConversationParticipant[]
+  messages     Message[]
+  calls        Call[]
+
+  @@index([lastMessageAt])
+  @@map("conversations")
+  @@schema("chat")
+}
+
+model ConversationParticipant {
+  id             String          @id @default(uuid()) @db.Uuid
+  conversationId String          @db.Uuid
+  userId         String          @db.Uuid
+  role           ParticipantRole @default(MEMBER)
+  /// Last time this user read the conversation. Drives unread counts.
+  lastReadAt     DateTime?
+  isMuted        Boolean         @default(false)
+  joinedAt       DateTime        @default(now())
+  leftAt         DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_participants")
+  @@schema("chat")
+}
+
+// ============================================================
+// MESSAGES
+// ============================================================
+
+model Message {
+  id             String      @id @default(uuid()) @db.Uuid
+  conversationId String      @db.Uuid
+  senderId       String      @db.Uuid
+  body           String
+  type           MessageType @default(TEXT)
+  /// Client generated idempotency key. Re-sending the same clientId
+  /// for the same sender returns the original message instead of duplicating.
+  clientId       String?
+  replyToId      String?     @db.Uuid
+  editedAt       DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime    @default(now())
+
+  conversation Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User          @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  replyTo      Message?      @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies      Message[]     @relation("MessageReplies")
+  reads        MessageRead[]
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, createdAt])
+  @@map("messages")
+  @@schema("chat")
+}
+
+model MessageRead {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @db.Uuid
+  userId    String   @db.Uuid
+  readAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId])
+  @@map("message_reads")
+  @@schema("chat")
+}
+
+// ============================================================
+// CALLS
+// ============================================================
+
+/// One voice/video call between two people. The record is written when the
+/// caller rings and updated as the call progresses, so a missed call is
+/// still visible in history after the fact.
+model Call {
+  id             String     @id @default(uuid()) @db.Uuid
+  conversationId String     @db.Uuid
+  /// Who placed the call.
+  callerId       String     @db.Uuid
+  /// Who was rung. Distinct from callerId so a self-call is representable.
+  calleeId       String     @db.Uuid
+  kind           CallKind   @default(AUDIO)
+  status         CallStatus @default(RINGING)
+  /// Set once the callee accepts, so duration is measurable.
+  answeredAt     DateTime?
+  endedAt        DateTime?
+  /// Why it ended, for display in history. Never contains free text from
+  /// the peer, so it cannot be used to smuggle content into the UI.
+  endReason      String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  caller       User         @relation("CallCaller", fields: [callerId], references: [id], onDelete: Cascade)
+  callee       User         @relation("CallReceiver", fields: [calleeId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([calleeId, status])
+  @@index([callerId, createdAt])
+  @@map("calls")
+  @@schema("chat")
+}
